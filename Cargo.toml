@@ -1,0 +1,8 @@
+[package]
+name = "fingertips"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.3.19", features  = ["derive"] }
+byteorder = "1.4.3"
