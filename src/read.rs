@@ -2,6 +2,7 @@
 //! index files.
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader, SeekFrom};
@@ -9,7 +10,10 @@ use std::path::Path;
 
 // ───── Current Crate Imports ────────────────────────────────────────────── //
 
+use crate::index::{Doc, Hit, Offsets};
+use crate::prelude::{InMemoryIndex, ParsedIndex};
 use crate::write::IndexFileWriter;
+use crate::HASH_LENGTH;
 
 // ───── Body ─────────────────────────────────────────────────────────────── //
 
@@ -19,6 +23,7 @@ use crate::write::IndexFileWriter;
 ///
 /// The only way to advance through the file is to use the `.move_entry_to()`
 /// method.
+#[derive(Debug)]
 pub struct IndexFileReader {
     /// Reader that reads the actual index data.
     ///
@@ -41,13 +46,14 @@ pub struct IndexFileReader {
 /// Each entry in the table of contents is small. It consists of a string, the
 /// `term`; summary information about that term, as used in the corpus (`df`);
 /// and a pointer to bulkier data that tells more (`offset` and `nbytes`).
+#[derive(Debug)]
 pub struct Entry {
     /// The term is a word that appears in one or more documents in the corpus.
     /// The index file contains information about the documents that use this
     /// word.
     pub term: String,
     /// Total number of documents in the corpus that contain this term.
-    pub ref_count: u32,
+    pub doc_count: u32,
     /// Offset of the index data for this term from the beginning of the file,
     /// in bytes.
     pub offset: u64,
@@ -98,45 +104,97 @@ impl IndexFileReader {
         })
     }
 
-    /// Read the next entry from the table of contents.
-    ///
-    /// Returns `Ok(None)` if we have reached the end of the file.
-    fn read_entry(f: &mut BufReader<File>) -> io::Result<Option<Entry>> {
-        // If the first read here fails with `Undexpected Eof`,
-        // that's considered a success, with no entry read.
-        let offset = match f.read_u64::<LittleEndian>() {
-            Ok(value) => value,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    return Ok(None);
-                } else {
-                    return Err(e);
+    /// Read and parse index from binary file to a user-friendly format.
+    pub fn get_index_from_file<P: AsRef<Path>>(
+        filename: P,
+    ) -> io::Result<ParsedIndex> {
+        let filename = filename.as_ref();
+        let mut f = File::open(filename)?;
+
+        // Read the file header.
+        let table_contents_offset = f.read_u64::<LittleEndian>()?;
+        println!(
+            "Opened {}, table of contents starts at {}",
+            filename.display(),
+            table_contents_offset
+        );
+
+        // Open again so we have two read heads;
+        // move the contents read head to its starting position.
+        // Set up buffering.
+        let mut table_contents_raw = File::open(filename)?;
+        table_contents_raw.seek(SeekFrom::Start(table_contents_offset))?;
+
+        // Data - reader over beginning of the index, 8 bytes skipped (u64 with
+        // offset information).
+        // Table - table of contents section.
+        let mut data = BufReader::new(f);
+        let mut table = BufReader::new(table_contents_raw);
+
+        // It will be our `HashMap` with term : DocEntry pairs.
+        let mut map = HashMap::new();
+        let mut word_count = 0;
+
+        loop {
+            // Offset from beginning of the binary file.
+            let offset = match table.read_u64::<LittleEndian>() {
+                Ok(v) => v,
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    } else {
+                        panic!("Wrong table format");
+                    }
                 }
-            }
-        };
+            };
+            // Length in bytes of our term's data.
+            let nbytes = table.read_u64::<LittleEndian>()?;
+            // Amount of documents where our term occurs.
+            let doc_count = table.read_u32::<LittleEndian>()?;
+            // Length of term in bytes
+            let term_length = table.read_u32::<LittleEndian>()?;
+            // Get term
+            let mut term = vec![0; term_length as usize];
+            table.read_exact(&mut term)?;
+            let term = String::from_utf8(term).unwrap();
 
-        let nbytes = f.read_u64::<LittleEndian>()?;
-        let ref_count = f.read_u32::<LittleEndian>()?;
-        let term_len = f.read_u32::<LittleEndian>()? as usize;
-        let mut bytes = Vec::with_capacity(term_len);
-        bytes.resize(term_len, 0);
-        f.read_exact(&mut bytes)?;
-        let term = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Unicode fail",
-                ))
-            }
-        };
+            word_count += 1;
 
-        Ok(Some(Entry {
-            term,
-            ref_count,
-            offset,
-            nbytes,
-        }))
+            // Seek to our term's data first byte
+            data.seek(SeekFrom::Start(offset))?;
+
+            let mut hits_raw = vec![0; nbytes as usize];
+            data.read_exact(&mut hits_raw)?;
+
+            // This entry is multiple docs and offsets which corresponds to
+            // one term.
+            let mut entry: HashMap<Doc, Offsets> = HashMap::new();
+
+            let reader = &mut hits_raw[..].as_ref();
+
+            for _ in 0..doc_count {
+                // Firsly we read hash, and create `Doc` object.
+                let hash = &mut [0; HASH_LENGTH];
+                reader.read_exact(&mut hash[..])?;
+                let doc = Doc::new(&hash[..]);
+
+                // How much offsets in this document existing.
+                let offsets_count = reader.read_u32::<LittleEndian>()?;
+                let mut offsets = vec![];
+
+                // Read all offsets.
+                for _ in 0..offsets_count {
+                    let word_offset = reader.read_u32::<LittleEndian>()?;
+                    offsets.push(word_offset);
+                }
+                // Push doc and offsets to entry
+                entry.insert(doc, offsets);
+            }
+            // Insert entry for term
+            map.insert(term, entry);
+        }
+
+        Ok(ParsedIndex { word_count, map })
     }
 
     /// Borrow a reference to the next entry in the table of contents.
@@ -179,5 +237,48 @@ impl IndexFileReader {
 
         self.next = Self::read_entry(&mut self.table_of_contents)?;
         Ok(())
+    }
+}
+
+impl IndexFileReader {
+    /// Read the next entry from the table of contents.
+    ///
+    /// Returns `Ok(None)` if we have reached the end of the file.
+    fn read_entry(f: &mut BufReader<File>) -> io::Result<Option<Entry>> {
+        // If the first read here fails with `Undexpected Eof`,
+        // that's considered a success, with no entry read.
+        let offset = match f.read_u64::<LittleEndian>() {
+            Ok(value) => value,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    return Ok(None);
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        let nbytes = f.read_u64::<LittleEndian>()?;
+        let doc_count = f.read_u32::<LittleEndian>()?;
+        let term_len = f.read_u32::<LittleEndian>()? as usize;
+        let mut bytes = Vec::with_capacity(term_len);
+        bytes.resize(term_len, 0);
+        f.read_exact(&mut bytes)?;
+        let term = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Unicode fail",
+                ))
+            }
+        };
+
+        Ok(Some(Entry {
+            term,
+            doc_count,
+            offset,
+            nbytes,
+        }))
     }
 }

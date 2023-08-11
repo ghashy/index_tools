@@ -79,6 +79,10 @@ impl FileMerge {
     }
 }
 
+/// Merge multiple index files into one.
+///
+/// `files` - the vector with paths to files
+/// `out` - the `BufWriter<File>` to write into.
 fn merge_streams(files: Vec<PathBuf>, out: BufWriter<File>) -> io::Result<()> {
     let mut streams: Vec<IndexFileReader> = files
         .into_iter()
@@ -99,10 +103,10 @@ fn merge_streams(files: Vec<PathBuf>, out: BufWriter<File>) -> io::Result<()> {
                     if term.is_none() || entry.term < *term.as_ref().unwrap() {
                         term = Some(entry.term.clone()); // XXX LAME clone
                         nbytes = entry.nbytes;
-                        df = entry.ref_count;
+                        df = entry.doc_count;
                     } else if entry.term == *term.as_ref().unwrap() {
                         nbytes += entry.nbytes;
-                        df += entry.ref_count;
+                        df += entry.doc_count;
                     }
                 }
             }

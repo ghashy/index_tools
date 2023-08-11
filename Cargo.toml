@@ -6,3 +6,12 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.3.19", features  = ["derive"] }
 byteorder = "1.4.3"
+ring = "0.16.20"
+
+[[bin]]
+name = "index_creator"
+path = "src/bin/index_creator.rs"
+
+[[bin]]
+name = "index_search"
+path = "src/bin/index_search.rs"

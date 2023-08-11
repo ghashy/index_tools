@@ -32,7 +32,7 @@ impl TmpDir {
             {
                 Ok(f) => return Ok((filename, BufWriter::new(f))),
                 Err(e) => {
-                    if retry < 10 && e.kind() == io::ErrorKind::AlreadyExists {
+                    if retry < 50 && e.kind() == io::ErrorKind::AlreadyExists {
                         // keep going
                     } else {
                         return Err(e);

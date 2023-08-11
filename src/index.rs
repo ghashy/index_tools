@@ -4,8 +4,10 @@
 //! `InMemoryIndex` can be used to do that, up to the size of the machine's
 //! memory.
 
-use byteorder::{LittleEndian, WriteBytesExt};
-use std::collections::HashMap;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::{collections::HashMap, path::PathBuf};
+
+use crate::HASH_LENGTH;
 
 // ───── Body ─────────────────────────────────────────────────────────────── //
 
@@ -31,6 +33,7 @@ pub type Hit = Vec<u8>;
 /// simple search queries. And you can use the `read`, `write` and `merge`
 /// modules to save an in-memory index to disk and merge it with other indices,
 /// producing a large index.
+#[derive(Debug)]
 pub struct InMemoryIndex {
     /// The total number of words in the indexed documents.
     pub word_count: usize,
@@ -59,10 +62,9 @@ impl InMemoryIndex {
     ///
     /// The resulting index contains exactly on one `Hit` per term.
     pub fn from_single_document(
-        document_id: usize,
+        document_hash: &[u8],
         text: String,
     ) -> InMemoryIndex {
-        let document_id = document_id as u32;
         let mut index = InMemoryIndex::new();
 
         let text = text.to_lowercase();
@@ -71,22 +73,33 @@ impl InMemoryIndex {
             let vec_with_hits =
                 index.map.entry(token.to_string()).or_insert_with(|| {
                     let mut hits = Vec::with_capacity(4 + 4); // 4 bytes + 4 bytes; u32 is 4 bytes
-                    hits.write_u32::<LittleEndian>(document_id).unwrap(); // Write doc id to hit
+                                                              // document_hash has length of 32 bytes
+                    for byte in document_hash {
+                        hits.write_u8(*byte).unwrap(); // Write doc hash to hit
+                    }
+                    // Write place for offsets count
+                    hits.write_u32::<LittleEndian>(0).unwrap();
                     vec![hits]
                 });
             vec_with_hits[0]
                 .write_u32::<LittleEndian>(i as u32) // Write word offset to hit
                 .unwrap();
-            index.word_count += 1;
-        }
 
-        if document_id % 100 == 0 {
-            println!(
-                "Indexed document {}, {} bytes, {} words",
-                document_id,
-                text.len(),
-                index.word_count
-            );
+            // Update offsets count
+            let offsets_count = (&vec_with_hits[0]
+                [HASH_LENGTH..HASH_LENGTH + 4])
+                .read_u32::<LittleEndian>()
+                .unwrap()
+                + 1;
+            let offsets_count = offsets_count.to_le_bytes();
+            for (idx, byte) in vec_with_hits[0][HASH_LENGTH..HASH_LENGTH + 4]
+                .iter_mut()
+                .enumerate()
+            {
+                *byte = offsets_count[idx];
+            }
+
+            index.word_count += 1;
         }
         index
     }
@@ -115,4 +128,33 @@ impl InMemoryIndex {
         const REASONABLE_SIZE: usize = 100_000_000;
         self.word_count > REASONABLE_SIZE
     }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Doc {
+    pub hash: Vec<u8>,
+}
+
+impl std::hash::Hash for Doc {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for n in &self.hash {
+            state.write_u8(*n);
+        }
+    }
+}
+
+impl Doc {
+    pub fn new(hash: &[u8]) -> Self {
+        Doc { hash: hash.into() }
+    }
+}
+
+pub type Offsets = Vec<u32>;
+
+pub type DocEntry = HashMap<Doc, Offsets>;
+
+#[derive(Debug)]
+pub struct ParsedIndex {
+    pub word_count: usize,
+    pub map: HashMap<String, DocEntry>,
 }

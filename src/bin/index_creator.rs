@@ -1,19 +1,5 @@
-//! `fingertips` creates an inverted index for a set of text files.
-//!
-//! Most of the actual work is done by the modules `index`, `read`, `write`,
-//! and `merge`. In this file, `main.rs` we put the pieces together in two
-//! different ways.
-//!
-//! *    `run_single_threaded` simply does everything in one thread, in the
-//!      the most straightforward possible way.
-//!
-//! *    Then, we break the work into a five-stage pipeline so that we can run
-//!      it on multiple CPUs. `run_pipeline` puts the five stages together.
-//!
-//! The `main` function at the end handles command-line arguments. It calls one
-//! of the two functions above to do the work.
-
 use clap::Parser;
+use ring::digest::{Context, Digest, SHA256};
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
@@ -23,18 +9,9 @@ use std::thread::{spawn, JoinHandle};
 
 // ───── Current Crate Imports ────────────────────────────────────────────── //
 
-use crate::index::InMemoryIndex;
-use crate::merge::FileMerge;
-use crate::tmp::TmpDir;
-use crate::write::write_index_to_tmp_file;
+use fingertips::prelude::*;
 
-// ───── Submodules ───────────────────────────────────────────────────────── //
-
-pub mod index;
-mod merge;
-mod read;
-mod tmp;
-mod write;
+// ───── Body ─────────────────────────────────────────────────────────────── //
 
 /// Create an inverted index for the given list of `documents`,
 /// storing it in the specified `output_dir`
@@ -55,14 +32,20 @@ fn run_single_threaded(
     let mut tmp_dir = TmpDir::new(&output_dir);
 
     // For each document in the set...
-    for (doc_id, filename) in documents.into_iter().enumerate() {
+    for filename in documents.into_iter() {
         // ...load it into memory...
         let mut f = File::open(filename)?;
         let mut text = String::new();
         f.read_to_string(&mut text)?;
 
+        // Hashing
+        let mut context = Context::new(&SHA256);
+        context.update(text.as_bytes());
+        let digest = context.finish();
+        let hash = digest.as_ref(); // has 32 bytes length
+
         // ...and add its contents to the in-memory `accumulated_index`.
-        let index = InMemoryIndex::from_single_document(doc_id, text);
+        let index = InMemoryIndex::from_single_document(hash, text);
         accumulated_index.merge(index);
         if accumulated_index.is_large() {
             // To avoid running out of memory, dump `accumulated_index` to
@@ -123,8 +106,14 @@ fn start_file_indexing_thread(
     let (tx, rx) = channel();
 
     let handle = spawn(move || {
-        for (doc_id, text) in texts.into_iter().enumerate() {
-            let index = InMemoryIndex::from_single_document(doc_id, text);
+        for text in texts.into_iter() {
+            // Hashing
+            let mut context = Context::new(&SHA256);
+            context.update(text.as_bytes());
+            let digest = context.finish();
+            let hash = digest.as_ref(); // has 32 bytes length
+
+            let index = InMemoryIndex::from_single_document(hash, text);
             if tx.send(index).is_err() {
                 break;
             }

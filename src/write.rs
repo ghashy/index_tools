@@ -46,14 +46,14 @@ impl IndexFileWriter {
     pub fn write_contents_entry(
         &mut self,
         term: String,
-        ref_count: u32,
+        doc_count: u32,
         offset: u64,
         nbytes: u64,
     ) {
         self.contents_buf.write_u64::<LittleEndian>(offset).unwrap();
         self.contents_buf.write_u64::<LittleEndian>(nbytes).unwrap();
         self.contents_buf
-            .write_u32::<LittleEndian>(ref_count)
+            .write_u32::<LittleEndian>(doc_count)
             .unwrap();
         let bytes = term.bytes();
         self.contents_buf
@@ -92,13 +92,13 @@ pub fn write_index_to_tmp_file(
     index_as_vec.sort_by(|&(ref a, _), &(ref b, _)| a.cmp(b));
 
     for (term, hits) in index_as_vec {
-        let ref_count = hits.len() as u32;
+        let doc_count = hits.len() as u32;
         let start = writer.offset;
         for buffer in hits {
             writer.write_data(&buffer)?;
         }
         let stop = writer.offset;
-        writer.write_contents_entry(term, ref_count, start, stop - start);
+        writer.write_contents_entry(term, doc_count, start, stop - start);
     }
 
     writer.finish()?;
